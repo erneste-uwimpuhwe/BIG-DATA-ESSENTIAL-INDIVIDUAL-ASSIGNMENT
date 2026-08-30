@@ -1,0 +1,126 @@
+========================================================================
+COMMANDS.TXT — Distributed Taxi Trip Analytics
+UWIMPUHWE Erneste (101414) — Big Data Essentials Assignment
+========================================================================
+All commands run in Windows cmd.exe / PowerShell, against a native-Windows
+Hadoop 3.2.4 pseudo-distributed cluster (HADOOP_HOME=C:\hadoop).
+Python is invoked with its full path (8.3 short form) inside -mapper /
+-reducer arguments because Hadoop Streaming task containers on Windows do
+not reliably inherit the full system PATH:
+    C:\Progra~1\Python313\python.exe
+
+------------------------------------------------------------------------
+0. START HADOOP
+------------------------------------------------------------------------
+start-dfs.cmd
+start-yarn.cmd
+jps
+:: expect: NameNode, DataNode, ResourceManager, NodeManager, Jps
+
+------------------------------------------------------------------------
+1. HDFS SETUP (Section 6)
+------------------------------------------------------------------------
+hdfs dfs -mkdir -p /taxi_project/input/raw
+hdfs dfs -mkdir -p /taxi_project/input/cleaned
+hdfs dfs -mkdir -p /taxi_project/output/hourly
+hdfs dfs -mkdir -p /taxi_project/output/locations
+hdfs dfs -mkdir -p /taxi_project/output/revenue
+hdfs dfs -mkdir -p /taxi_project/output/payment
+hdfs dfs -mkdir -p /taxi_project/output/routes
+hdfs dfs -mkdir -p /taxi_project/output/anomalies
+hdfs dfs -mkdir -p /taxi_project/archive
+
+:: Upload cleaned CSVs (produced by clean_and_convert.py)
+hdfs dfs -put C:\taxi_project\cleaned\yellow_tripdata_2026-01_cleaned.csv /taxi_project/input/cleaned/
+hdfs dfs -put C:\taxi_project\cleaned\yellow_tripdata_2026-02_cleaned.csv /taxi_project/input/cleaned/
+hdfs dfs -put C:\taxi_project\cleaned\yellow_tripdata_2026-03_cleaned.csv /taxi_project/input/cleaned/
+
+:: Upload raw Parquet (retained for provenance)
+hdfs dfs -put C:\taxi_project\raw_parquet\yellow_tripdata_2026-01.parquet /taxi_project/input/raw/
+hdfs dfs -put C:\taxi_project\raw_parquet\yellow_tripdata_2026-02.parquet /taxi_project/input/raw/
+hdfs dfs -put C:\taxi_project\raw_parquet\yellow_tripdata_2026-03.parquet /taxi_project/input/raw/
+
+:: Evidence commands
+hdfs dfs -ls -R /taxi_project
+hdfs dfs -ls -h /taxi_project/input/cleaned/
+hdfs dfs -du -h /taxi_project/input/raw
+hdfs dfs -du -h /taxi_project/input/cleaned
+hdfs dfsadmin -report
+
+------------------------------------------------------------------------
+2. MAPREDUCE JOBS (Section 8a-8i)
+------------------------------------------------------------------------
+:: Set JAR_PATH once per session for brevity
+set JAR_PATH=C:/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.2.4.jar
+set PY=C:\Progra~1\Python313\python.exe
+
+:: --- 8a. Hourly Taxi Demand ---
+hdfs dfs -rm -r /taxi_project/output/hourly
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_hourly.py,file:///C:/taxi_project/reducers/reducer_hourly.py" -input /taxi_project/input/cleaned -output /taxi_project/output/hourly -mapper "%PY% mapper_hourly.py" -reducer "%PY% reducer_hourly.py"
+hdfs dfs -cat /taxi_project/output/hourly/part-00000
+
+:: --- 8b. Daily Demand ---
+hdfs dfs -rm -r /taxi_project/output/daily
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_daily.py,file:///C:/taxi_project/reducers/reducer_daily.py" -input /taxi_project/input/cleaned -output /taxi_project/output/daily -mapper "%PY% mapper_daily.py" -reducer "%PY% reducer_daily.py"
+hdfs dfs -cat /taxi_project/output/daily/part-00000
+
+:: --- 8c. Pickup Location Analysis ---
+hdfs dfs -rm -r /taxi_project/output/locations
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_location.py,file:///C:/taxi_project/reducers/reducer_location.py" -input /taxi_project/input/cleaned -output /taxi_project/output/locations -mapper "%PY% mapper_location.py" -reducer "%PY% reducer_location.py"
+hdfs dfs -get /taxi_project/output/locations C:\taxi_project\output_local\
+python C:\taxi_project\extract_top_bottom_locations.py C:\taxi_project\output_local\locations\part-00000
+
+:: --- 8d. Revenue by Pickup Location (also Job 1 of multi-stage, Section 9) ---
+hdfs dfs -rm -r /taxi_project/output/revenue
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_revenue.py,file:///C:/taxi_project/reducers/reducer_revenue.py" -input /taxi_project/input/cleaned -output /taxi_project/output/revenue -mapper "%PY% mapper_revenue.py" -reducer "%PY% reducer_revenue.py"
+hdfs dfs -cat /taxi_project/output/revenue/part-00000
+
+:: --- 8e. Payment Method Analysis ---
+hdfs dfs -rm -r /taxi_project/output/payment
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_payment.py,file:///C:/taxi_project/reducers/reducer_payment.py" -input /taxi_project/input/cleaned -output /taxi_project/output/payment -mapper "%PY% mapper_payment.py" -reducer "%PY% reducer_payment.py"
+hdfs dfs -cat /taxi_project/output/payment/part-00000
+
+:: --- 8f. Distance-Based Fare Analysis ---
+hdfs dfs -rm -r /taxi_project/output/distance
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_distance.py,file:///C:/taxi_project/reducers/reducer_distance.py" -input /taxi_project/input/cleaned -output /taxi_project/output/distance -mapper "%PY% mapper_distance.py" -reducer "%PY% reducer_distance.py"
+hdfs dfs -cat /taxi_project/output/distance/part-00000
+
+:: --- 8g. Busiest Pickup-Drop-off Routes ---
+hdfs dfs -rm -r /taxi_project/output/routes
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_route.py,file:///C:/taxi_project/reducers/reducer_route.py" -input /taxi_project/input/cleaned -output /taxi_project/output/routes -mapper "%PY% mapper_route.py" -reducer "%PY% reducer_route.py"
+hdfs dfs -get /taxi_project/output/routes C:\taxi_project\output_local\
+python C:\taxi_project\extract_top_routes.py C:\taxi_project\output_local\routes\part-00000
+
+:: --- 8h. Trip Duration Analysis ---
+hdfs dfs -rm -r /taxi_project/output/duration
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_duration.py,file:///C:/taxi_project/reducers/reducer_duration.py" -input /taxi_project/input/cleaned -output /taxi_project/output/duration -mapper "%PY% mapper_duration.py" -reducer "%PY% reducer_duration.py"
+hdfs dfs -cat /taxi_project/output/duration/part-00000
+
+:: --- 8i. Anomaly Detection ---
+hdfs dfs -rm -r /taxi_project/output/anomalies
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_anomaly.py,file:///C:/taxi_project/reducers/reducer_anomaly.py" -input /taxi_project/input/cleaned -output /taxi_project/output/anomalies -mapper "%PY% mapper_anomaly.py" -reducer "%PY% reducer_anomaly.py"
+hdfs dfs -cat /taxi_project/output/anomalies/part-00000
+
+------------------------------------------------------------------------
+3. MULTI-STAGE MAPREDUCE (Section 9 — Compulsory)
+------------------------------------------------------------------------
+:: Job 1 (revenue by zone) is the 8d job above and must be run FIRST.
+:: Job 2 reads Job 1's HDFS output directly:
+hdfs dfs -rm -r /taxi_project/output/top10_revenue
+hadoop jar %JAR_PATH% -files "file:///C:/taxi_project/mappers/mapper_top10_revenue.py,file:///C:/taxi_project/reducers/reducer_top10_revenue.py" -input /taxi_project/output/revenue -output /taxi_project/output/top10_revenue -mapper "%PY% mapper_top10_revenue.py" -reducer "%PY% reducer_top10_revenue.py"
+hdfs dfs -cat /taxi_project/output/top10_revenue/part-00000
+
+------------------------------------------------------------------------
+4. YARN EVIDENCE (Section 11)
+------------------------------------------------------------------------
+:: Open in browser: http://localhost:8088/cluster
+:: Click each Application ID to view StartTime, FinishTime, State,
+:: FinalStatus, and container details.
+
+------------------------------------------------------------------------
+5. PERFORMANCE COMPARISON (Section 12 — Compulsory)
+------------------------------------------------------------------------
+pip install psutil
+python C:\taxi_project\performance_comparison.py
+
+
